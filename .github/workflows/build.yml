@@ -1,14 +1,25 @@
-name: Dump OpenOrbis Samples
+name: Build PS4 Horror3D PKG
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  dump-samples:
+  build:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Tools
+        run: |
+          set -e
+          if ! command -v clang >/dev/null 2>&1 || ! command -v ld.lld >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y clang lld
+          fi
+
       - name: Download OpenOrbis Toolchain
         run: |
           set -e
@@ -19,103 +30,61 @@ jobs:
             | jq -r '.assets[] | select(.name | endswith(".tar.gz")) | .browser_download_url' \
             | head -n 1)
 
-          echo "Download URL: $TAR_URL"
           if [ -z "$TAR_URL" ] || [ "$TAR_URL" = "null" ]; then
-            echo "ERROR: Could not find tar.gz release asset."
+            echo "ERROR: Could not find OpenOrbis tar.gz release."
             exit 1
           fi
 
           curl -sL "$TAR_URL" -o toolchain.tar.gz
           tar -xzf toolchain.tar.gz -C toolchain
 
-      - name: Dump Piglet and Input Samples
+      - name: Prepare and Build PKG
+        env:
+          DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: "1"
+          DOTNET_ROLL_FORWARD: "Major"
         run: |
           set -e
-          KERNEL_H=$(find toolchain -path "*/orbis/libkernel.h" | head -n 1 || true)
-          echo "Found libkernel.h at: $KERNEL_H"
-
-          SAMPLES_DIR=$(find toolchain -maxdepth 4 -type d -name "samples" | head -n 1 || true)
-          if [ -z "$SAMPLES_DIR" ]; then
-            echo "samples folder not found in tar.gz, cloning repository..."
-            git clone --depth 1 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git repo_tmp
-            SAMPLES_DIR="repo_tmp/samples"
-          fi
-
-          if [ ! -d "$SAMPLES_DIR" ]; then
-            echo "ERROR: Could not find samples directory."
+          KERNEL_H=$(find toolchain -path "*/orbis/libkernel.h" | head -n 1)
+          if [ -z "$KERNEL_H" ]; then
+            echo "ERROR: orbis/libkernel.h not found."
             exit 1
           fi
 
-          OUT="samples_dump.txt"
-          {
-            echo "=== TOOLCHAIN INFO ==="
-            echo "libkernel.h: $KERNEL_H"
-            echo "samples dir: $SAMPLES_DIR"
-            echo ""
-            echo "=== ALL SAMPLE FOLDERS ==="
-            find "$SAMPLES_DIR" -maxdepth 2 -mindepth 1 -type d | sort
-            echo ""
-          } > "$OUT"
+          export OO_PS4_TOOLCHAIN=$(realpath "$(dirname "$(dirname "$(dirname "$KERNEL_H")")")")
+          echo "OO_PS4_TOOLCHAIN=$OO_PS4_TOOLCHAIN"
 
-          dump_folder() {
-            local DIR="$1"
-            echo "========================================" >> "$OUT"
-            echo "SAMPLE FOLDER: $DIR" >> "$OUT"
-            echo "========================================" >> "$OUT"
-            echo "--- File List ---" >> "$OUT"
-            find "$DIR" -type f | sort >> "$OUT"
-            echo "" >> "$OUT"
+          find "$OO_PS4_TOOLCHAIN/bin/linux" -type f -exec chmod +x {} +
 
-            find "$DIR" -type f -size -100k \( \
-              -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \
-              -o -name "Makefile" -o -name "*.mk" -o -name "*.glsl" \
-              -o -name "*.vert" -o -name "*.frag" -o -name "*.md" \
-              -o -name "*.txt" -o -name "*.sh" \
-            \) | sort | while IFS= read -r FILE; do
-              echo ">>> BEGIN FILE: $FILE" >> "$OUT"
-              cat "$FILE" >> "$OUT"
-              echo "" >> "$OUT"
-              echo "<<< END FILE: $FILE" >> "$OUT"
-              echo "" >> "$OUT"
-            done
-          }
+          rm -rf build_proj
+          mkdir -p build_proj
+          cp -r "$OO_PS4_TOOLCHAIN/samples/piglet" build_proj/horror3d
+          mv build_proj/horror3d/piglet build_proj/horror3d/horror3d
 
-          FOUND_ANY=0
-          while IFS= read -r DIR; do
-            NAME=$(basename "$DIR" | tr '[:upper:]' '[:lower:]')
-            case "$NAME" in
-              *piglet*|*opengl*|*gles*|*pad*|*input*|*controller*)
-                dump_folder "$DIR"
-                FOUND_ANY=1
-                ;;
-            esac
-          done < <(find "$SAMPLES_DIR" -maxdepth 1 -mindepth 1 -type d | sort)
-
-          if [ "$FOUND_ANY" -eq 0 ]; then
-            while IFS= read -r DIR; do
-              NAME=$(basename "$DIR" | tr '[:upper:]' '[:lower:]')
-              case "$NAME" in
-                *piglet*|*opengl*|*gles*|*pad*|*input*|*controller*)
-                  dump_folder "$DIR"
-                  FOUND_ANY=1
-                  ;;
-              esac
-            done < <(find "$SAMPLES_DIR" -maxdepth 2 -mindepth 2 -type d | sort)
+          if [ -d "src" ] && [ -n "$(ls -A src 2>/dev/null)" ]; then
+            echo "Copying custom source files from src/..."
+            rm -f build_proj/horror3d/horror3d/*.c build_proj/horror3d/horror3d/*.cpp build_proj/horror3d/horror3d/*.h build_proj/horror3d/horror3d/*.hpp
+            cp -r src/* build_proj/horror3d/horror3d/
           fi
 
-          if [ "$FOUND_ANY" -eq 0 ]; then
-            echo "WARNING: No matching piglet or input sample folder found." >> "$OUT"
-          fi
+          cd build_proj/horror3d
 
-          if [ ! -s "$OUT" ]; then
-            echo "ERROR: samples_dump.txt is empty or missing."
+          sed -i 's|^TITLE[[:space:]]*:=.*|TITLE       := Horror House 3D|' Makefile
+          sed -i 's|^TITLE_ID[[:space:]]*:=.*|TITLE_ID    := HORR00001|' Makefile
+          sed -i 's|^CONTENT_ID[[:space:]]*:=.*|CONTENT_ID  := IV0000-HORR00001_00-HORROR3DGAME0001|' Makefile
+          sed -i 's|^LIBS[[:space:]]*:=.*|& -lScePad -lSceUserService|' Makefile
+
+          make
+
+          PKG_FILE="IV0000-HORR00001_00-HORROR3DGAME0001.pkg"
+          if [ ! -f "$PKG_FILE" ] || [ ! -s "$PKG_FILE" ]; then
+            echo "ERROR: Expected PKG file $PKG_FILE was not created!"
             exit 1
           fi
 
-          ls -lh "$OUT"
+          ls -lh "$PKG_FILE"
 
-      - name: Upload Samples Dump
+      - name: Upload PKG Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: samples-dump
-          path: samples_dump.txt
+          name: HorrorHouse3D-pkg
+          path: build_proj/horror3d/IV0000-HORR00001_00-HORROR3DGAME0001.pkg
