@@ -12,12 +12,45 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Build Tools
+      - name: Install Build Tools and libssl1.1
         run: |
           set -e
           if ! command -v clang >/dev/null 2>&1 || ! command -v ld.lld >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install -y clang lld
+          fi
+
+          if ! ldconfig -p | grep -q 'libssl\.so\.1\.1'; then
+            echo "Installing libssl.so.1.1 for PkgTool.Core..."
+            INSTALLED=0
+            for BASE_URL in \
+              "http://security.ubuntu.com/ubuntu/pool/main/o/openssl/" \
+              "http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/" \
+              "http://deb.debian.org/debian/pool/main/o/openssl/" \
+              "http://archive.debian.org/debian/pool/main/o/openssl/" \
+              "http://old-releases.ubuntu.com/ubuntu/pool/main/o/openssl/"; do
+              DEB_NAME=$(curl -fsSL "$BASE_URL" 2>/dev/null \
+                | grep -oE 'href="libssl1\.1_[^"]*_amd64\.deb"' \
+                | sed 's/^href="//;s/"$//' \
+                | sort -V \
+                | tail -n 1 || true)
+              if [ -n "$DEB_NAME" ]; then
+                echo "Downloading ${BASE_URL}${DEB_NAME}"
+                if curl -fsSL "${BASE_URL}${DEB_NAME}" -o /tmp/libssl1.1.deb; then
+                  rm -rf /tmp/libssl1.1_ext
+                  dpkg -x /tmp/libssl1.1.deb /tmp/libssl1.1_ext
+                  find /tmp/libssl1.1_ext \( -name 'libssl.so.1.1' -o -name 'libcrypto.so.1.1' \) \
+                    -exec sudo cp -L {} /usr/lib/x86_64-linux-gnu/ \;
+                  sudo ldconfig
+                  INSTALLED=1
+                  break
+                fi
+              fi
+            done
+            if [ "$INSTALLED" -ne 1 ] || ! ldconfig -p | grep -q 'libssl\.so\.1\.1'; then
+              echo "ERROR: Could not install libssl.so.1.1"
+              exit 1
+            fi
           fi
 
       - name: Download OpenOrbis Toolchain
