@@ -1,123 +1,58 @@
-name: Build PS4 Horror3D PKG
+name: Horror start
 
 on:
-  push:
   workflow_dispatch:
+  push:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-
+    runs-on: ubuntu-22.04
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Build Tools and libssl1.1
+      - name: Install tools
         run: |
-          set -e
-          if ! command -v clang >/dev/null 2>&1 || ! command -v ld.lld >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y clang lld
-          fi
+          sudo apt-get update
+          sudo apt-get install -y clang lld
 
-          if ! ldconfig -p | grep -q 'libssl\.so\.1\.1'; then
-            echo "Installing libssl.so.1.1 for PkgTool.Core..."
-            INSTALLED=0
-            for BASE_URL in \
-              "http://security.ubuntu.com/ubuntu/pool/main/o/openssl/" \
-              "http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/" \
-              "http://deb.debian.org/debian/pool/main/o/openssl/" \
-              "http://archive.debian.org/debian/pool/main/o/openssl/" \
-              "http://old-releases.ubuntu.com/ubuntu/pool/main/o/openssl/"; do
-              DEB_NAME=$(curl -fsSL "$BASE_URL" 2>/dev/null \
-                | grep -oE 'href="libssl1\.1_[^"]*_amd64\.deb"' \
-                | sed 's/^href="//;s/"$//' \
-                | sort -V \
-                | tail -n 1 || true)
-              if [ -n "$DEB_NAME" ]; then
-                echo "Downloading ${BASE_URL}${DEB_NAME}"
-                if curl -fsSL "${BASE_URL}${DEB_NAME}" -o /tmp/libssl1.1.deb; then
-                  rm -rf /tmp/libssl1.1_ext
-                  dpkg -x /tmp/libssl1.1.deb /tmp/libssl1.1_ext
-                  find /tmp/libssl1.1_ext \( -name 'libssl.so.1.1' -o -name 'libcrypto.so.1.1' \) \
-                    -exec sudo cp -L {} /usr/lib/x86_64-linux-gnu/ \;
-                  sudo ldconfig
-                  INSTALLED=1
-                  break
-                fi
-              fi
-            done
-            if [ "$INSTALLED" -ne 1 ] || ! ldconfig -p | grep -q 'libssl\.so\.1\.1'; then
-              echo "ERROR: Could not install libssl.so.1.1"
-              exit 1
-            fi
-          fi
-
-      - name: Download OpenOrbis Toolchain
+      - name: Download OpenOrbis toolchain
         run: |
-          set -e
+          curl -sL https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/latest -o rel.json
+          URL=$(grep browser_download_url rel.json | grep -i 'tar.gz' | head -1 | cut -d '"' -f4)
+          curl -L -o toolchain.tar.gz "$URL"
           mkdir -p toolchain
-          TAR_URL=$(curl -sL \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/latest \
-            | jq -r '.assets[] | select(.name | endswith(".tar.gz")) | .browser_download_url' \
-            | head -n 1)
-
-          if [ -z "$TAR_URL" ] || [ "$TAR_URL" = "null" ]; then
-            echo "ERROR: Could not find OpenOrbis tar.gz release."
-            exit 1
-          fi
-
-          curl -sL "$TAR_URL" -o toolchain.tar.gz
           tar -xzf toolchain.tar.gz -C toolchain
 
-      - name: Prepare and Build PKG
-        env:
-          DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: "1"
-          DOTNET_ROLL_FORWARD: "Major"
+      - name: Collect samples and build piglet
         run: |
-          set -e
-          KERNEL_H=$(find toolchain -path "*/orbis/libkernel.h" | head -n 1)
-          if [ -z "$KERNEL_H" ]; then
-            echo "ERROR: orbis/libkernel.h not found."
-            exit 1
-          fi
+          H=$(find toolchain -path '*orbis/libkernel.h' | head -1)
+          export OO_PS4_TOOLCHAIN=$PWD/$(dirname $(dirname $(dirname $H)))
+          export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+          export DOTNET_ROLL_FORWARD=Major
+          chmod +x $OO_PS4_TOOLCHAIN/bin/linux/* || true
+          cp -r $OO_PS4_TOOLCHAIN/samples samples
+          mkdir -p out
+          {
+            echo "=== LISTING samples"; ls samples
+            echo "=== LISTING toolchain lib"; ls $OO_PS4_TOOLCHAIN/lib
+            echo "=== LISTING include/orbis"; ls $OO_PS4_TOOLCHAIN/include/orbis
+            echo "=== LISTING piglet files"; find samples/piglet -type f
+          } > out/sources.txt
+          for d in piglet input _common; do
+            find samples/$d -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name 'Makefile' -o -name '*.glsl' -o -name '*.vert' -o -name '*.frag' \) -size -80k | while read f; do
+              echo "=== $f"
+              cat "$f"
+            done >> out/sources.txt
+          done
+          cd samples/piglet
+          make || true
+          cd ../..
+          find samples/piglet -name '*.pkg' -exec cp {} out/ \;
+          ls -la out
 
-          export OO_PS4_TOOLCHAIN=$(realpath "$(dirname "$(dirname "$(dirname "$KERNEL_H")")")")
-          echo "OO_PS4_TOOLCHAIN=$OO_PS4_TOOLCHAIN"
-
-          find "$OO_PS4_TOOLCHAIN/bin/linux" -type f -exec chmod +x {} +
-
-          rm -rf build_proj
-          mkdir -p build_proj
-          cp -r "$OO_PS4_TOOLCHAIN/samples/piglet" build_proj/horror3d
-          mv build_proj/horror3d/piglet build_proj/horror3d/horror3d
-
-          if [ -d "src" ] && [ -n "$(ls -A src 2>/dev/null)" ]; then
-            echo "Copying custom source files from src/..."
-            rm -f build_proj/horror3d/horror3d/*.c build_proj/horror3d/horror3d/*.cpp build_proj/horror3d/horror3d/*.h build_proj/horror3d/horror3d/*.hpp
-            cp -r src/* build_proj/horror3d/horror3d/
-          fi
-
-          cd build_proj/horror3d
-
-          sed -i 's|^TITLE[[:space:]]*:=.*|TITLE       := Horror House 3D|' Makefile
-          sed -i 's|^TITLE_ID[[:space:]]*:=.*|TITLE_ID    := HORR00001|' Makefile
-          sed -i 's|^CONTENT_ID[[:space:]]*:=.*|CONTENT_ID  := IV0000-HORR00001_00-HORROR3DGAME0001|' Makefile
-          sed -i 's|^LIBS[[:space:]]*:=.*|& -lScePad -lSceUserService|' Makefile
-
-          make
-
-          PKG_FILE="IV0000-HORR00001_00-HORROR3DGAME0001.pkg"
-          if [ ! -f "$PKG_FILE" ] || [ ! -s "$PKG_FILE" ]; then
-            echo "ERROR: Expected PKG file $PKG_FILE was not created!"
-            exit 1
-          fi
-
-          ls -lh "$PKG_FILE"
-
-      - name: Upload PKG Artifact
+      - name: Upload result
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: HorrorHouse3D-pkg
-          path: build_proj/horror3d/IV0000-HORR00001_00-HORROR3DGAME0001.pkg
+          name: horror-start
+          path: out/*
