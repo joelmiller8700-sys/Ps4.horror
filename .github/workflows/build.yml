@@ -1,60 +1,62 @@
-name: Extract PS4 Samples
+name: Dump OpenOrbis Samples
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  extract_samples:
+  dump_samples:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download OpenOrbis Toolchain
+      - name: Download OpenOrbis Toolchain and Dump Samples
         run: |
-          curl -fLJO https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.3/toolchain-llvm-18.2.zip
-          unzip -q toolchain-llvm-18.2.zip
-          tar -xzf toolchain-llvm-18.tar.gz -C ./
+          set -e
+          echo "Downloading latest OpenOrbis toolchain..."
+          DOWNLOAD_URL=$(curl -s https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/latest | grep "browser_download_url.*tar.gz" | cut -d '"' -f 4 | head -n 1)
+          curl -L -o toolchain.tar.gz "$DOWNLOAD_URL"
           
-          # إذا مجلد samples ما موجود كامل بالنسخة المترجمة، نسحبه من مستودع OpenOrbis الرسمي
-          if [ ! -d "OpenOrbis/PS4Toolchain/samples/piglet" ]; then
-            git clone --depth 1 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git oo_repo
-            cp -r oo_repo/samples OpenOrbis/PS4Toolchain/
+          mkdir -p toolchain_dir
+          tar -xzf toolchain.tar.gz -C toolchain_dir
+          
+          HEADER_PATH=$(find $(pwd)/toolchain_dir -name "libkernel.h" | grep "orbis/libkernel.h" | head -n 1)
+          if [ -z "$HEADER_PATH" ]; then
+            echo "Error: Could not find orbis/libkernel.h"
+            exit 1
           fi
-
-      - name: Extract Piglet and Input Samples to Text File
-        run: |
-          OUT="samples_source.txt"
-          OO_DIR="$PWD/OpenOrbis/PS4Toolchain"
           
-          echo "=== TOOLCHAIN STRUCTURE ===" > "$OUT"
-          find "$OO_DIR/samples/piglet" "$OO_DIR/samples/input" -maxdepth 4 >> "$OUT" 2>&1
+          OO_TOOLCHAIN=$(dirname $(dirname $(dirname $(dirname "$HEADER_PATH"))))
+          echo "Found Toolchain Root at: $OO_TOOLCHAIN"
           
-          echo -e "\n\n================ PIGLET SAMPLE ================" >> "$OUT"
-          find "$OO_DIR/samples/piglet" -type f \( -name "Makefile" -o -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "*.vert" -o -name "*.frag" -o -name "*.glsl" \) | while read -r file; do
-            echo -e "\n--- FILE: $file ---" >> "$OUT"
-            cat "$file" >> "$OUT"
+          OUT_FILE="$(pwd)/samples_dump.txt"
+          echo "=== OPENORBIS SAMPLES DUMP ===" > "$OUT_FILE"
+          
+          echo "--- ALL DIRECTORIES IN SAMPLES ---" >> "$OUT_FILE"
+          find "$OO_TOOLCHAIN/samples" -maxdepth 2 -type d >> "$OUT_FILE" 2>&1 || true
+          echo "" >> "$OUT_FILE"
+          
+          for SAMPLE in piglet input pad audio; do
+            echo "==========================================" >> "$OUT_FILE"
+            echo "SEARCHING FOR SAMPLE: $SAMPLE" >> "$OUT_FILE"
+            echo "==========================================" >> "$OUT_FILE"
+            
+             matches=$(find "$OO_TOOLCHAIN/samples" -iname "*$SAMPLE*")
+             for match in $matches; do
+               if [ -d "$match" ]; then
+                 echo ">>> Directory: $match" >> "$OUT_FILE"
+                 find "$match" -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "Makefile" -o -name "*.vert" -o -name "*.frag" \) | while read -r file; do
+                   echo "--- FILE: $file ---" >> "$OUT_FILE"
+                   cat "$file" >> "$OUT_FILE"
+                   echo "" >> "$OUT_FILE"
+                 done
+               fi
+             done
           done
 
-          echo -e "\n\n================ INPUT SAMPLE ================" >> "$OUT"
-          find "$OO_DIR/samples/input" -type f \( -name "Makefile" -o -name "*.cpp" -o -name "*.c" -o -name "*.h" \) | while read -r file; do
-            echo -e "\n--- FILE: $file ---" >> "$OUT"
-            cat "$file" >> "$OUT"
-          done
-
-          echo -e "\n\n================ KEY HEADERS (Pad, Piglet, AudioOut) ================" >> "$OUT"
-          for hdr in Pad.h Pigletv2VSH.h AudioOut.h; do
-            found=$(find "$OO_DIR/include" -name "$hdr" | head -n 1)
-            if [ -n "$found" ]; then
-              echo -e "\n--- HEADER: $found ---" >> "$OUT"
-              cat "$found" >> "$OUT"
-            fi
-          done
-
-      - name: Upload Samples Source Artifact
+      - name: Upload Samples Dump Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ps4-samples-source
-          path: samples_source.txt
+          name: samples-dump
+          path: samples_dump.txt
