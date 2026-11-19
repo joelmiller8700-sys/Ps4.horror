@@ -5,70 +5,116 @@ on:
   workflow_dispatch:
 
 jobs:
-  dump_samples:
+  dump-samples:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download OpenOrbis Toolchain and Dump Samples
+      - name: Download OpenOrbis Toolchain
         run: |
-          set +e
-          set +o pipefail
+          set -e
+          mkdir -p toolchain
+          TAR_URL=$(curl -sL \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/latest \
+            | jq -r '.assets[] | select(.name | endswith(".tar.gz")) | .browser_download_url' \
+            | head -n 1)
 
-          echo "Downloading latest OpenOrbis toolchain..."
-          API_JSON=$(curl -sL https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/latest)
-          DOWNLOAD_URL=$(echo "$API_JSON" | grep "browser_download_url.*tar\.gz" | cut -d '"' -f 4 | head -n 1)
-
-          if [ -z "$DOWNLOAD_URL" ]; then
-            echo "Error: Could not find download URL from GitHub API"
-            echo "$API_JSON"
+          echo "Download URL: $TAR_URL"
+          if [ -z "$TAR_URL" ] || [ "$TAR_URL" = "null" ]; then
+            echo "ERROR: Could not find tar.gz release asset."
             exit 1
           fi
 
-          echo "Downloading from: $DOWNLOAD_URL"
-          curl -L -o toolchain.tar.gz "$DOWNLOAD_URL"
+          curl -sL "$TAR_URL" -o toolchain.tar.gz
+          tar -xzf toolchain.tar.gz -C toolchain
 
-          mkdir -p toolchain_dir
-          tar -xzf toolchain.tar.gz -C toolchain_dir
+      - name: Dump Piglet and Input Samples
+        run: |
+          set -e
+          KERNEL_H=$(find toolchain -path "*/orbis/libkernel.h" | head -n 1 || true)
+          echo "Found libkernel.h at: $KERNEL_H"
 
-          HEADER_PATH=$(find "$(pwd)/toolchain_dir" -path "*/orbis/libkernel.h" | head -n 1)
-          if [ -z "$HEADER_PATH" ]; then
-            echo "Error: Could not find orbis/libkernel.h"
-            find "$(pwd)/toolchain_dir" -maxdepth 3
+          SAMPLES_DIR=$(find toolchain -maxdepth 4 -type d -name "samples" | head -n 1 || true)
+          if [ -z "$SAMPLES_DIR" ]; then
+            echo "samples folder not found in tar.gz, cloning repository..."
+            git clone --depth 1 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git repo_tmp
+            SAMPLES_DIR="repo_tmp/samples"
+          fi
+
+          if [ ! -d "$SAMPLES_DIR" ]; then
+            echo "ERROR: Could not find samples directory."
             exit 1
           fi
 
-          OO_TOOLCHAIN=$(dirname "$(dirname "$(dirname "$HEADER_PATH")")")
-          echo "Found Toolchain Root at: $OO_TOOLCHAIN"
+          OUT="samples_dump.txt"
+          {
+            echo "=== TOOLCHAIN INFO ==="
+            echo "libkernel.h: $KERNEL_H"
+            echo "samples dir: $SAMPLES_DIR"
+            echo ""
+            echo "=== ALL SAMPLE FOLDERS ==="
+            find "$SAMPLES_DIR" -maxdepth 2 -mindepth 1 -type d | sort
+            echo ""
+          } > "$OUT"
 
-          OUT_FILE="$(pwd)/samples_dump.txt"
-          echo "=== OPENORBIS SAMPLES DUMP ===" > "$OUT_FILE"
-          echo "Toolchain Root: $OO_TOOLCHAIN" >> "$OUT_FILE"
-          echo "" >> "$OUT_FILE"
+          dump_folder() {
+            local DIR="$1"
+            echo "========================================" >> "$OUT"
+            echo "SAMPLE FOLDER: $DIR" >> "$OUT"
+            echo "========================================" >> "$OUT"
+            echo "--- File List ---" >> "$OUT"
+            find "$DIR" -type f | sort >> "$OUT"
+            echo "" >> "$OUT"
 
-          echo "--- ALL DIRECTORIES IN SAMPLES ---" >> "$OUT_FILE"
-          find "$OO_TOOLCHAIN/samples" -maxdepth 2 -type d >> "$OUT_FILE" 2>&1
-          echo "" >> "$OUT_FILE"
-
-          for SAMPLE in piglet input pad audio; do
-            echo "==========================================" >> "$OUT_FILE"
-            echo "SEARCHING FOR SAMPLE: $SAMPLE" >> "$OUT_FILE"
-            echo "==========================================" >> "$OUT_FILE"
-
-            find "$OO_TOOLCHAIN/samples" -type d -iname "*$SAMPLE*" | while read -r match; do
-              echo ">>> Directory: $match" >> "$OUT_FILE"
-              find "$match" -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "Makefile" -o -name "*.vert" -o -name "*.frag" \) | while read -r file; do
-                echo "--- FILE: $file ---" >> "$OUT_FILE"
-                cat "$file" >> "$OUT_FILE"
-                echo "" >> "$OUT_FILE"
-              done
+            find "$DIR" -type f -size -100k \( \
+              -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \
+              -o -name "Makefile" -o -name "*.mk" -o -name "*.glsl" \
+              -o -name "*.vert" -o -name "*.frag" -o -name "*.md" \
+              -o -name "*.txt" -o -name "*.sh" \
+            \) | sort | while IFS= read -r FILE; do
+              echo ">>> BEGIN FILE: $FILE" >> "$OUT"
+              cat "$FILE" >> "$OUT"
+              echo "" >> "$OUT"
+              echo "<<< END FILE: $FILE" >> "$OUT"
+              echo "" >> "$OUT"
             done
-          done
+          }
 
-          ls -lh "$OUT_FILE"
+          FOUND_ANY=0
+          while IFS= read -r DIR; do
+            NAME=$(basename "$DIR" | tr '[:upper:]' '[:lower:]')
+            case "$NAME" in
+              *piglet*|*opengl*|*gles*|*pad*|*input*|*controller*)
+                dump_folder "$DIR"
+                FOUND_ANY=1
+                ;;
+            esac
+          done < <(find "$SAMPLES_DIR" -maxdepth 1 -mindepth 1 -type d | sort)
 
-      - name: Upload Samples Dump Artifact
+          if [ "$FOUND_ANY" -eq 0 ]; then
+            while IFS= read -r DIR; do
+              NAME=$(basename "$DIR" | tr '[:upper:]' '[:lower:]')
+              case "$NAME" in
+                *piglet*|*opengl*|*gles*|*pad*|*input*|*controller*)
+                  dump_folder "$DIR"
+                  FOUND_ANY=1
+                  ;;
+              esac
+            done < <(find "$SAMPLES_DIR" -maxdepth 2 -mindepth 2 -type d | sort)
+          fi
+
+          if [ "$FOUND_ANY" -eq 0 ]; then
+            echo "WARNING: No matching piglet or input sample folder found." >> "$OUT"
+          fi
+
+          if [ ! -s "$OUT" ]; then
+            echo "ERROR: samples_dump.txt is empty or missing."
+            exit 1
+          fi
+
+          ls -lh "$OUT"
+
+      - name: Upload Samples Dump
         uses: actions/upload-artifact@v4
         with:
           name: samples-dump
