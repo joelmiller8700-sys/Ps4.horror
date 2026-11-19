@@ -1,138 +1,60 @@
-name: Build PS4 Horror PKG
+name: Extract PS4 Samples
 
 on:
   push:
-    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04
+  extract_samples:
+    runs-on: ubuntu-latest
 
     steps:
-      - name: 1. Checkout Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 2. Install clang, lld and dependencies
+      - name: Download OpenOrbis Toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld curl jq findutils
-
-      - name: 3. Download Latest OpenOrbis Toolchain via GitHub API
-        run: |
-          mkdir -p $HOME/toolchain
-          API_URL="https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/latest"
-          TAR_URL=$(curl -s $API_URL | jq -r '.assets[] | select(.name | endswith(".tar.gz")) | .browser_download_url' | head -n 1)
-          echo "Downloading Toolchain from: $TAR_URL"
-          if [ -z "$TAR_URL" ] || [ "$TAR_URL" = "null" ]; then
-            echo "ERROR: Could not find tar.gz URL from GitHub API!"
-            exit 1
+          curl -fLJO https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.3/toolchain-llvm-18.2.zip
+          unzip -q toolchain-llvm-18.2.zip
+          tar -xzf toolchain-llvm-18.tar.gz -C ./
+          
+          # إذا مجلد samples ما موجود كامل بالنسخة المترجمة، نسحبه من مستودع OpenOrbis الرسمي
+          if [ ! -d "OpenOrbis/PS4Toolchain/samples/piglet" ]; then
+            git clone --depth 1 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git oo_repo
+            cp -r oo_repo/samples OpenOrbis/PS4Toolchain/
           fi
-          curl -L "$TAR_URL" -o /tmp/toolchain.tar.gz
-          tar -xzf /tmp/toolchain.tar.gz -C $HOME/toolchain
 
-      - name: 4. Dump Official Samples and Headers for Inspection
+      - name: Extract Piglet and Input Samples to Text File
         run: |
-          HEADER_FILE=$(find $HOME/toolchain -name "libkernel.h" | grep "orbis/libkernel.h" | head -n 1)
-          TC_ROOT=$(echo "$HEADER_FILE" | sed 's|/include/orbis/libkernel.h||')
-          echo "Toolchain Root is: $TC_ROOT"
+          OUT="samples_source.txt"
+          OO_DIR="$PWD/OpenOrbis/PS4Toolchain"
+          
+          echo "=== TOOLCHAIN STRUCTURE ===" > "$OUT"
+          find "$OO_DIR/samples/piglet" "$OO_DIR/samples/input" -maxdepth 4 >> "$OUT" 2>&1
+          
+          echo -e "\n\n================ PIGLET SAMPLE ================" >> "$OUT"
+          find "$OO_DIR/samples/piglet" -type f \( -name "Makefile" -o -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "*.vert" -o -name "*.frag" -o -name "*.glsl" \) | while read -r file; do
+            echo -e "\n--- FILE: $file ---" >> "$OUT"
+            cat "$file" >> "$OUT"
+          done
 
-          OUT_FILE="$GITHUB_WORKSPACE/toolchain_dump.txt"
-          echo "=== OPENORBIS TOOLCHAIN DUMP ===" > "$OUT_FILE"
+          echo -e "\n\n================ INPUT SAMPLE ================" >> "$OUT"
+          find "$OO_DIR/samples/input" -type f \( -name "Makefile" -o -name "*.cpp" -o -name "*.c" -o -name "*.h" \) | while read -r file; do
+            echo -e "\n--- FILE: $file ---" >> "$OUT"
+            cat "$file" >> "$OUT"
+          done
 
-          echo -e "\n\n================ SAMPLES DIRECTORY LIST ================" >> "$OUT_FILE"
-          ls -la "$TC_ROOT/samples" >> "$OUT_FILE" 2>&1 || true
-
-          echo -e "\n\n================ ORBIS HEADERS LIST ================" >> "$OUT_FILE"
-          ls -la "$TC_ROOT/include/orbis" >> "$OUT_FILE" 2>&1 || true
-
-          echo -e "\n\n================ GLES2 / EGL HEADERS LIST ================" >> "$OUT_FILE"
-          find "$TC_ROOT/include" -maxdepth 3 >> "$OUT_FILE" 2>&1 || true
-
-          # استخراج أكواد الأمثلة الرسمية المهمة (piglet, input, threading, audio, graphics)
-          for SAMPLE in piglet input threading graphics audio; do
-            if [ -d "$TC_ROOT/samples/$SAMPLE" ]; then
-              echo -e "\n\n################################################################" >> "$OUT_FILE"
-              echo "### SAMPLE: $SAMPLE" >> "$OUT_FILE"
-              echo "################################################################" >> "$OUT_FILE"
-              find "$TC_ROOT/samples/$SAMPLE" -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "Makefile" -o -name "*.vert" -o -name "*.frag" \) | while read -r FILE; do
-                echo -e "\n--- FILE: $FILE ---" >> "$OUT_FILE"
-                cat "$FILE" >> "$OUT_FILE"
-              done
+          echo -e "\n\n================ KEY HEADERS (Pad, Piglet, AudioOut) ================" >> "$OUT"
+          for hdr in Pad.h Pigletv2VSH.h AudioOut.h; do
+            found=$(find "$OO_DIR/include" -name "$hdr" | head -n 1)
+            if [ -n "$found" ]; then
+              echo -e "\n--- HEADER: $found ---" >> "$OUT"
+              cat "$found" >> "$OUT"
             fi
           done
 
-          # استخراج ملفات الهيدر المهمة للصوت، الفيديو، الخيوط، و Piglet
-          for HDR in AudioOut.h VideoOut.h Pigletv2VSH.h Pad.h UserService.h libkernel.h; do
-            FOUND_HDR=$(find "$TC_ROOT/include" -name "$HDR" | head -n 1)
-            if [ -n "$FOUND_HDR" ]; then
-              echo -e "\n\n================================================================" >> "$OUT_FILE"
-              echo "=== HEADER: $FOUND_HDR" >> "$OUT_FILE"
-              echo "================================================================" >> "$OUT_FILE"
-              cat "$FOUND_HDR" >> "$OUT_FILE"
-            fi
-          done
-
-      - name: 5. Build PKG using Official Sample Makefile
-        run: |
-          HEADER_FILE=$(find $HOME/toolchain -name "libkernel.h" | grep "orbis/libkernel.h" | head -n 1)
-          TC_ROOT=$(echo "$HEADER_FILE" | sed 's|/include/orbis/libkernel.h||')
-
-          export OO_PS4_TOOLCHAIN="$TC_ROOT"
-          export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
-          export DOTNET_ROLL_FORWARD=Major
-          chmod +x "$OO_PS4_TOOLCHAIN/bin/linux/"* || true
-
-          # نسخ مجلد samples بالكامل إلى مساحة العمل للحفاظ على ملفات _common
-          cp -r "$OO_PS4_TOOLCHAIN/samples" /tmp/samples_work
-          cd /tmp/samples_work
-
-          # نسخ مثال input كقاعدة للبناء
-          cp -r input horror_game
-          cd horror_game
-
-          # إعادة تسمية المجلد الداخلي ليطابق اسم المجلد الأب (مطلب أساسي في Makefile الرسمي)
-          if [ -d "input" ]; then
-            mv input horror_game
-          fi
-
-          # حذف ملفات المصدر الأصلية ووضع ملفنا main.cpp
-          rm -f horror_game/*.cpp horror_game/*.c
-          cp "$GITHUB_WORKSPACE/main.cpp" horror_game/main.cpp
-
-          # تعديل إعدادات الـ PKG في Makefile (طول CONTENT_ID ثابت 36 حرفاً بالضبط)
-          sed -i 's|^TITLE[[:space:]]*:=.*|TITLE := House Of Shadows|' Makefile
-          sed -i 's|^TITLE_ID[[:space:]]*:=.*|TITLE_ID := BREW00666|' Makefile
-          sed -i 's|^CONTENT_ID[[:space:]]*:=.*|CONTENT_ID := IV0000-BREW00666_00-HORRORHOUSE00000|' Makefile
-
-          # إضافة المكتبات المطلوبة إلى LIBS
-          sed -i 's|^LIBS[[:space:]]*:=.*|LIBS := -lc -lkernel -lc++ -lSceUserService -lScePad -lSceVideoOut -lSceAudioOut|' Makefile
-
-          echo "=== Modified Makefile ==="
-          cat Makefile
-
-          # تشغيل البناء
-          make
-
-          # التحقق الصارم من إنتاج ملف الـ PKG
-          PKG_FILE=$(find . -maxdepth 2 -name "*.pkg" | head -n 1)
-          if [ -z "$PKG_FILE" ]; then
-            echo "ERROR: PKG file was NOT generated!"
-            exit 1
-          fi
-
-          echo "SUCCESS! Found PKG: $PKG_FILE"
-          cp "$PKG_FILE" "$GITHUB_WORKSPACE/IV0000-BREW00666_00-HORRORHOUSE00000.pkg"
-
-      - name: 6. Upload Toolchain Dump Artifact
-        if: always()
+      - name: Upload Samples Source Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: toolchain-info-dump
-          path: toolchain_dump.txt
-
-      - name: 7. Upload PS4 PKG Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ps4-horror-pkg
-          path: "*.pkg"
+          name: ps4-samples-source
+          path: samples_source.txt
